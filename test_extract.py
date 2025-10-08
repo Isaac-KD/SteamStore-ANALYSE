@@ -15,28 +15,27 @@ DESACTIVER_LOGS = not ACTIVER_LOGS
 HEADERS = {
     'User-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
-# Augmentation du timeout pour les connexions lentes ou les serveurs surchargés
+
 REQUEST_TIMEOUT = 20
 log_level = logging.INFO if ACTIVER_LOGS else logging.CRITICAL + 1
 logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-# --- FONCTION AMÉLIORÉE AVEC GESTION DES ERREURS ET DES ESSAIS MULTIPLES ---
 async def fetch_with_retries(session: aiohttp.ClientSession, url: str, app_id: int) -> Optional[str]:
     """Tente de récupérer une URL avec plusieurs essais en cas d'erreur serveur (5xx)."""
     max_retries = 3
-    base_delay = 2  # secondes
+    base_delay = 2  
     for attempt in range(max_retries):
         try:
             cookies = {'birthtime': '631152001', 'lastagecheckage': '1-January-1990'}
             async with session.get(url, timeout=REQUEST_TIMEOUT, cookies=cookies) as response:
-                if response.status >= 500: # Erreur serveur (500, 503, etc.)
+                if response.status >= 500:
                     logging.warning(f"Serveur inaccessible (code {response.status}) pour l'App ID {app_id}. Tentative {attempt + 1}/{max_retries}...")
                     if attempt + 1 < max_retries:
-                        await asyncio.sleep(base_delay * (2 ** attempt)) # Exponential backoff: 2s, 4s, 8s...
-                    continue # Passe à la tentative suivante
+                        await asyncio.sleep(base_delay * (2 ** attempt)) 
+                    continue
                 
-                response.raise_for_status() # Lève une exception pour les autres erreurs HTTP (4xx)
+                response.raise_for_status() 
                 return await response.text()
                 
         except aiohttp.ClientError as e:
@@ -97,13 +96,12 @@ async def process_game(app_id: int, session: aiohttp.ClientSession, processor: S
                 await processor.flush_batches_if_needed()
 
         except Exception:
-            # --- MODIFICATION CLÉ POUR LE DEBUGGING ---
             # Utilise logging.exception pour afficher la trace complète de l'erreur
             logging.exception(f"Une erreur inattendue est survenue lors du traitement de l'App ID {app_id}")
 
 
 async def main():
-    # --- RÉDUCTION DE LA CONCURRENCE POUR ÉVITER LE BLOCAGE IP ---
+
     CONCURRENCY_LIMIT = 10
     BATCH_SAVE_SIZE = 20 
     OUTPUT_FILENAME = "ma_collection_steam.jsonl"

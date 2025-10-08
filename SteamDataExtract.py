@@ -43,7 +43,6 @@ class SteamDataProcessor:
     par schéma JSON et écriture par lots (périodique et finale).
     """
 
-    # --- MODIFICATION 1 : Ajout du paramètre 'enable_logging' ---
     def __init__(self, output_filename: str, schema_filename: str, invalid_output_filename: str, batch_size: int = 20, enable_logging: bool = True):
         self.output_filename = output_filename
         self.invalid_output_filename = invalid_output_filename
@@ -75,9 +74,6 @@ class SteamDataProcessor:
         try:
             return BeautifulSoup(html_content, 'lxml').get_text(separator='\n', strip=True)
         except Exception as e:
-            # On laisse un logging ici car c'est une erreur de parsing bas niveau qui peut être utile
-            # même si le logging général est désactivé, mais on peut aussi le conditionner.
-            # Pour l'instant, on le laisse inconditionnel car c'est une exception inattendue.
             logging.warning(f"Impossible de nettoyer le contenu HTML: {e}")
             return html_content
 

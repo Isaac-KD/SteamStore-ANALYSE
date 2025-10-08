@@ -1,0 +1,196 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Schéma pour une entrée de jeu Steam (Version Robuste et Structurée)",
+  "description": "Définit la structure et les contraintes de données attendues pour un jeu scrapé depuis Steam, avec une configuration requise structurée.",
+  "type": "object",
+  "properties": {
+    "app_id": {
+      "description": "L'identifiant unique de l'application sur Steam. Doit être un entier positif.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "nom": {
+      "description": "Le nom du jeu. Ne peut pas être une chaîne vide.",
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "image": {
+      "description": "L'URL de l'image d'en-tête du jeu. Doit être une URL valide.",
+      "type": "string",
+      "format": "uri"
+    },
+    "type": {
+      "description": "Le type de l'application.",
+      "type": "string",
+      "enum": ["jeu", "dlc"]
+    },
+    "description_courte": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "description_detaillee": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "est_gratuit": {
+      "type": "boolean"
+    },
+    "date_de_sortie": {
+      "type": "string",
+      "minLength": 4
+    },
+    "developpeurs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "editeurs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "franchise": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "genres": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "categories": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "tags_utilisateurs": {
+      "description": "Les tags définis par la communauté. Doit en contenir au moins un.",
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "plateformes": {
+      "description": "Liste des plateformes supportées (windows, mac, linux).",
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "configuration_requise": {
+        "description": "Contient la configuration structurée minimale et/ou recommandée pour chaque plateforme.",
+        "type": "object",
+        "properties": {
+            "pc": { "$ref": "#/definitions/platformRequirements" },
+            "mac": { "$ref": "#/definitions/platformRequirements" },
+            "linux": { "$ref": "#/definitions/platformRequirements" }
+        },
+        "additionalProperties": false
+    },
+    "support_manette": {
+      "type": ["string", "null"],
+      "enum": ["full", "partial", null]
+    },
+    "langues": {
+      "type": "object",
+      "properties": {
+        "support_audio_complet": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "support_partiel": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      },
+      "required": ["support_audio_complet", "support_partiel"]
+    },
+    "evaluations": {
+      "type": "object",
+      "properties": {
+        "metacritic_score": {
+          "description": "Score Metacritic, doit être entre 0 et 100.",
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "recommandations_total": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "avis_utilisateurs": {
+          "type": "object",
+          "properties": {
+            "total_positif": { "type": "integer", "minimum": 0 },
+            "total": { "type": "integer", "minimum": 0 },
+            "pourcentage_positif": { "type": "number", "minimum": 0, "maximum": 100 }
+          },
+          "required": ["total_positif", "total", "pourcentage_positif"]
+        }
+      },
+      "required": ["avis_utilisateurs"]
+    },
+    "donnees_commerciales": {
+      "type": "object",
+      "properties": {
+        "prix_initial": { "type": "integer", "minimum": 0 },
+        "prix_final": { "type": "integer", "minimum": 0 },
+        "pourcentage_reduction": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "devise": {
+            "description": "Code de la devise sur 3 lettres majuscules (ISO 4217).",
+            "type": "string",
+            "pattern": "^[A-Z]{3}$"
+        },
+        "dlcs": {
+            "type": "array",
+            "items": { "type": "integer", "minimum": 1 }
+        }
+      },
+      "required": ["prix_initial", "prix_final", "pourcentage_reduction", "devise"]
+    },
+    "contenu_et_fonctionnalites": {
+      "type": "object",
+      "properties": {
+        "nombre_succes": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["nombre_succes"]
+    }
+  },
+  "required": [
+    "app_id",
+    "nom",
+    "image",
+    "type",
+    "description_courte",
+    "est_gratuit",
+    "date_de_sortie",
+    "developpeurs",
+    "editeurs",
+    "plateformes",
+    "langues",
+    "evaluations",
+    "donnees_commerciales",
+    "contenu_et_fonctionnalites"
+  ],
+  "definitions": {
+    "platformRequirements": {
+      "type": "object",
+      "properties": {
+        "minimum": { "$ref": "#/definitions/requirementSet" },
+        "recommande": { "$ref": "#/definitions/requirementSet" }
+      },
+      "additionalProperties": false,
+      "minProperties": 1
+    },
+    "requirementSet": {
+      "type": "object",
+      "properties": {
+        "os": { "type": "string" },
+        "processeur": { "type": "string" },
+        "memoire_vive": { "type": "string" },
+        "graphiques": { "type": "string" },
+        "directx": { "type": "string" },
+        "stockage": { "type": "string" },
+        "reseau": { "type": "string" },
+        "carte_son": { "type": "string" },
+        "notes_supplementaires": { "type": "string" },
+        "support_vr": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

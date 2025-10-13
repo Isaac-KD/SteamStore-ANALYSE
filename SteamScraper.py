@@ -1,7 +1,7 @@
-# Fichier : SteamScraper.py
-# Description : Script autonome qui découvre (si besoin) puis traite les jeux Steam
-#               par lots de manière continue, en gérant les blocages IP via une 
-#               hibernation et des délais dynamiques.
+# Fichier : scraper_autotune.py
+# Description : Un scraper auto-apprenant doté d'un "Gouverneur de Performance"
+#               qui cherche et maintient dynamiquement la vitesse de scraping
+#               maximale possible en sondant les limites des serveurs Steam.
 
 import os
 import asyncio
@@ -11,317 +11,267 @@ import logging
 import re
 import random
 import time
+import argparse
+from collections import deque
+from enum import Enum, auto
 from tqdm.asyncio import tqdm_asyncio
-from typing import Set, Optional, Dict, Any, Tuple
+from typing import Set, Optional, Dict, Any, Tuple, List
 
-# --- DÉPENDANCE EXTERNE ---
+# --- Configuration du Logger ---
+logger = logging.getLogger(__name__)
+
 try:
-    # Ce fichier est nécessaire pour le traitement et la validation des données
-    from SteamDataExtract import SteamDataProcessor 
+    from SteamDataExtract import SteamDataProcessor
 except ImportError:
-    print("ERREUR: Le fichier 'SteamDataExtract.py' est introuvable. Assurez-vous qu'il est dans le même dossier.")
-    exit()
+    logger.critical("ERREUR: Le fichier 'SteamDataExtract.py' est introuvable.")
+    exit(1)
 
 # ==============================================================================
-# --- CLASSE D'EXCEPTION ---
+# --- CLASSES DE CONTRÔLE ET D'EXCEPTION ---
 # ==============================================================================
 
-class IPBannedException(Exception):
-    """Exception levée quand notre IP est considérée comme bannie."""
-    pass
+class IPBannedException(Exception): pass
 
-# ==============================================================================
-# --- CLASSE POUR LA GESTION DYNAMIQUE DES DÉLAIS ---
-# ==============================================================================
+class RequestOutcome(Enum):
+    SUCCESS = auto()
+    RATE_LIMIT = auto()
+    FAILURE = auto()
 
-class DynamicDelayManager:
-    """Gère dynamiquement les temps de pause pour éviter le rate limiting."""
-    def __init__(self, min_delay=2.0, max_delay=5.0, increase_factor=1.5, decrease_factor=0.995):
-        self.base_min = min_delay
-        self.base_max = max_delay
-        self.increase_factor = increase_factor
-        self.decrease_factor = decrease_factor
-        logging.info(f"Contrôleur de vitesse initialisé : Délai entre {self.base_min:.2f}s et {self.base_max:.2f}s")
+class GovernorState(Enum):
+    OPTIMIZING = auto() # Cherche à accélérer
+    THROTTLED = auto()  # A trouvé la limite, se stabilise
+    RECOVERING = auto() # Vitesse minimale après un ban
 
-    def get_delay(self) -> float:
-        """Retourne une durée de pause aléatoire dans la fourchette actuelle."""
-        return random.uniform(self.base_min, self.base_max)
+class PerformanceGovernor:
+    """Le cerveau du scraper. Apprend et ajuste la vitesse pour une performance maximale."""
+    def __init__(self, args):
+        self.args = args
+        self.state = GovernorState.OPTIMIZING
+        
+        # Garde l'historique des X derniers résultats
+        self.history = deque(maxlen=args.history_size)
+        
+        # Limites et état de la vitesse
+        self.min_concurrency = args.min_concurrency
+        self.max_concurrency = args.max_concurrency
+        self.min_delay = args.min_delay
+        self.max_delay = args.max_delay
+        self.current_concurrency = self.min_concurrency
+        self.current_delay = (self.min_delay + self.max_delay) / 2 # Commence au milieu
 
-    def record_success(self):
-        """Réduit légèrement les délais après une requête réussie."""
-        self.base_min = max(1.25, self.base_min * self.decrease_factor) # Ne descend pas sous 1.25s
-        self.base_max = max(2, self.base_max * self.decrease_factor) # Ne descend pas sous 2s
+        logger.info("Gouverneur de Performance activé. Prêt à trouver la vitesse optimale.")
 
-    def record_rate_limit(self):
-        """Augmente significativement les délais après une erreur de type 429."""
-        logging.warning("RATE LIMIT DÉTECTÉ. Augmentation agressive des délais.")
-        self.base_min *= self.increase_factor
-        self.base_max = self.base_min + random.uniform(2, 5) # Ajoute une variance
-        logging.info(f"Nouveaux délais ajustés : entre {self.base_min:.2f}s et {self.base_max:.2f}s")
+    @property
+    def status_line(self) -> str:
+        """Retourne une ligne de statut lisible."""
+        stats = {outcome: self.history.count(outcome) for outcome in RequestOutcome}
+        rate_limit_pct = (stats.get(RequestOutcome.RATE_LIMIT, 0) / len(self.history) * 100) if self.history else 0
+        return (f"État: {self.state.name} | "
+                f"Concurrence: {self.get_concurrency()} | "
+                f"Délai: ~{self.current_delay:.2f}s | "
+                f"Taux 429 (récent): {rate_limit_pct:.1f}%")
+
+    def get_concurrency(self) -> int: return int(self.current_concurrency)
+    def get_delay(self) -> float: return self.current_delay * random.uniform(0.8, 1.2)
+
+    def record_outcome(self, outcome: RequestOutcome):
+        """Enregistre le résultat d'une requête."""
+        self.history.append(outcome)
+
+    def assess_and_adjust(self):
+        """Analyse l'historique récent et ajuste la stratégie de vitesse."""
+        if len(self.history) < self.args.history_size / 2:
+            return # Attend d'avoir assez de données
+
+        rate_limit_pct = self.history.count(RequestOutcome.RATE_LIMIT) / len(self.history)
+
+        # --- Logique de changement d'état ---
+        if self.state == GovernorState.OPTIMIZING and rate_limit_pct > self.args.throttle_threshold_pct / 100:
+            self.state = GovernorState.THROTTLED
+            logger.warning(f"Seuil de Rate Limit dépassé ({rate_limit_pct:.1f}%). Passage en mode THROTTLED.")
+        elif self.state == GovernorState.THROTTLED and rate_limit_pct < self.args.throttle_threshold_pct / 100:
+            self.state = GovernorState.OPTIMIZING
+            logger.info("Taux de Rate Limit stabilisé. Retour en mode OPTIMIZING.")
+
+        # --- Logique d'ajustement de la vitesse ---
+        if self.state == GovernorState.OPTIMIZING:
+            # Accélère agressivement
+            self.current_delay = max(self.min_delay, self.current_delay * 0.95)
+            if self.current_delay == self.min_delay:
+                self.current_concurrency = min(self.max_concurrency, self.current_concurrency + 0.5) # Augmente doucement
+        
+        elif self.state == GovernorState.THROTTLED:
+            # Ralentit pour se stabiliser juste sous la limite
+            self.current_concurrency = max(self.min_concurrency, self.current_concurrency * 0.9)
+            self.current_delay = min(self.max_delay, self.current_delay * 1.1)
+
+        elif self.state == GovernorState.RECOVERING:
+            # N'accélère que si le taux d'erreur est absolument nul
+            if rate_limit_pct == 0:
+                self.state = GovernorState.OPTIMIZING
+                logger.info("Récupération terminée. Reprise de l'optimisation.")
+
+    def reset_after_ban(self):
+        """Réinitialisation d'urgence après une hibernation."""
+        self.state = GovernorState.RECOVERING
+        self.current_concurrency = self.min_concurrency
+        self.current_delay = self.max_delay
+        self.history.clear()
+        logger.critical("HIBERNATION TERMINÉE. Passage en mode RECOVERING à vitesse minimale.")
 
 # ==============================================================================
 # --- CLASSE PRINCIPALE DU SCRAPER ---
 # ==============================================================================
 
 class SteamScraper:
-    """
-    Orchestre l'ensemble du processus de scraping, de la découverte des IDs
-    au traitement détaillé des jeux, avec une gestion robuste des erreurs et des blocages.
-    """
-    # --- Configuration du Scraping ---
-    ALL_IDS_FILENAME = "data_collected/all_app_ids.txt"
-    SOURCE_JSON_FOR_DISCOVERY = "data_collected/steam_indie_games_final_api.json"
-    SCRAPE_CHUNK_SIZE = 50 # Lots plus grands grâce à une meilleure gestion
-
-    # --- Stratégie "Anti-Blocage" ---
-    SCRAPE_CONCURRENCY =2 # Moins de requêtes parallèles pour plus de discrétion
-    HIBERNATION_DURATION_MINUTES = 30 # Hibernation plus longue en cas de blocage IP
-
-    # --- Chemins et Paramètres Techniques ---
-    OUTPUT_FILENAME = "data_collected/steam_indie_games_detailed.jsonl"
-    SCHEMA_FILENAME = "schema.json"
-    INVALID_OUTPUT_FILENAME = "data_collected/steam_indie_games_errors.jsonl"
-    BATCH_SAVE_SIZE = 50 # Sauvegarde des données tous les 50 jeux
-    HEADERS = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8', # Priorise le français mais accepte l'anglais
-    }
-    REQUEST_TIMEOUT = 30
-    AGE_GATE_COOKIES = {'birthtime': '631152001', 'lastagecheckage': '1-January-1990'}
-
-    def __init__(self):
-        """Initialise le scraper."""
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    def __init__(self, args):
+        self.args = args
+        self.governor = PerformanceGovernor(args)
+        self.processor = SteamDataProcessor(
+            output_filename=args.output_file, schema_filename="schema.json",
+            invalid_output_filename=args.invalid_output_file, batch_size=args.chunk_size,
+            enable_logging=False
+        )
         os.makedirs("data_collected", exist_ok=True)
-        # Instance du gestionnaire de délais dynamiques
-        self.delay_manager = DynamicDelayManager(min_delay=3.0, max_delay=7.0)
+        self.HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        self.COOKIES = {'birthtime': '568022401', 'wants_mature_content': '1', 'Steam_Language': 'english', 'steamCountry': 'US'}
 
-    @staticmethod
-    def save_all_ids(ids: Set[int], filename: str):
-        """Sauvegarde un ensemble d'IDs dans un fichier, un par ligne."""
-        logging.info(f"Sauvegarde de {len(ids)} IDs dans '{filename}'...")
-        with open(filename, 'w', encoding='utf-8') as f:
-            for app_id in sorted(list(ids)):
-                f.write(f"{app_id}\n")
-
-    @staticmethod
-    def load_ids(filename: str) -> Set[int]:
-        """Charge les IDs depuis un fichier."""
-        if not os.path.exists(filename):
-            return set()
-        with open(filename, 'r', encoding='utf-8') as f:
-            ids = {int(line.strip()) for line in f if line.strip().isdigit()}
-        logging.info(f"{len(ids)} IDs chargés depuis '{filename}'.")
-        return ids
-
-    @staticmethod
-    def get_already_processed_ids(filename: str) -> Set[int]:
-        """Lit un fichier .jsonl pour extraire les IDs des jeux déjà traités."""
-        processed_ids = set()
-        if not os.path.exists(filename):
-            return processed_ids
-        with open(filename, 'r', encoding='utf-8') as f:
-            for line in f:
-                try:
-                    data = json.loads(line)
-                    if 'app_id' in data:
-                        processed_ids.add(data['app_id'])
-                except json.JSONDecodeError:
-                    continue
-        return processed_ids
+    def _get_steam_urls(self, app_id: int): # ... (inchangé)
+        return {"details": f"https://store.steampowered.com/api/appdetails?appids={app_id}&l=english",
+                "reviews": f"https://store.steampowered.com/appreviews/{app_id}?json=1&language=english",
+                "store_page": f"https://store.steampowered.com/app/{app_id}/?l=english"}
     
     @staticmethod
-    def is_captcha_page(html_text: str) -> bool:
-        """Vérifie si le HTML contient une page de CAPTCHA."""
-        return "g-recaptcha" in html_text or "Veuillez vérifier que vous n'êtes pas un robot" in html_text
+    def get_already_processed_ids(filenames: List[str]): # ... (inchangé)
+        processed_ids = set()
+        for filename in filenames:
+            if not os.path.exists(filename): continue
+            with open(filename, 'r', encoding='utf-8') as f:
+                for line in f:
+                    try: processed_ids.add(json.loads(line)['app_id'])
+                    except (json.JSONDecodeError, KeyError): continue
+        return processed_ids
 
-    async def discover_all_app_ids_from_json(self) -> Set[int]:
-        """Lit un fichier JSON source pour en extraire tous les App IDs uniques."""
-        logging.info(f"--- PHASE DE DÉCOUVERTE : Lecture depuis '{self.SOURCE_JSON_FOR_DISCOVERY}' ---")
-        
-        if not os.path.exists(self.SOURCE_JSON_FOR_DISCOVERY):
-            logging.error(f"Le fichier source '{self.SOURCE_JSON_FOR_DISCOVERY}' est introuvable.")
-            logging.error("Veuillez d'abord lancer le script de collecte des URLs.")
+    @staticmethod
+    def discover_all_app_ids_from_json(source_file: str): # ... (inchangé)
+        if not os.path.exists(source_file):
+            logger.error(f"Fichier source '{source_file}' introuvable.")
             return set()
-
-        all_ids = set()
         try:
-            with open(self.SOURCE_JSON_FOR_DISCOVERY, 'r', encoding='utf-8') as f:
-                games_list = json.load(f)
-                for game in games_list:
-                    if url := game.get("URL"):
-                        if match := re.search(r'\/app\/(\d+)\/', url):
-                            all_ids.add(int(match.group(1)))
-            logging.info(f"--- DÉCOUVERTE TERMINÉE : {len(all_ids)} IDs uniques extraits. ---")
-            return all_ids
+            with open(source_file, 'r', encoding='utf-8') as f: games = json.load(f)
+            ids = {int(m.group(1)) for g in games if (url := g.get("URL")) and (m := re.search(r'\/app\/(\d+)\/', url))}
+            logger.info(f"Découverte terminée: {len(ids)} IDs uniques trouvés.")
+            return ids
         except (json.JSONDecodeError, IOError) as e:
-            logging.error(f"Erreur lors de la lecture de '{self.SOURCE_JSON_FOR_DISCOVERY}': {e}")
+            logger.error(f"Erreur de lecture de '{source_file}': {e}")
             return set()
 
-    async def fetch_with_retries(self, session: aiohttp.ClientSession, url: str) -> Optional[str]:
-        """Effectue une requête web avec gestion des erreurs et des limites de taux."""
+    async def process_game_details(self, app_id: int, session: aiohttp.ClientSession) -> RequestOutcome:
+        """Traite un seul jeu et retourne son résultat pour le gouverneur."""
+        await asyncio.sleep(self.governor.get_delay())
+        urls = self._get_steam_urls(app_id)
         try:
-            async with session.get(url, timeout=self.REQUEST_TIMEOUT, cookies=self.AGE_GATE_COOKIES) as response:
-                if response.status == 429:
-                    self.delay_manager.record_rate_limit()
-                    logging.warning("Rate Limited (429). Pause forcée de 90 secondes...")
-                    await asyncio.sleep(90)
-                    # Nouvelle tentative après la pause
-                    async with session.get(url, timeout=self.REQUEST_TIMEOUT, cookies=self.AGE_GATE_COOKIES) as retry_response:
-                        retry_response.raise_for_status()
-                        self.delay_manager.record_success()
-                        return await retry_response.text()
-                        
-                if response.status == 403:
-                    raise IPBannedException(f"IP bannie (403) à l'URL {url}.")
-                
-                response.raise_for_status()
-                html = await response.text()
-                
-                if self.is_captcha_page(html):
-                    raise IPBannedException(f"Page CAPTCHA détectée sur {url}.")
-                
-                self.delay_manager.record_success()
-                return html
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logging.warning(f"Erreur réseau pour {url}: {e}.")
-            return None
-
-    async def fetch_steam_api_data_async(self, session: aiohttp.ClientSession, app_id: int) -> Tuple[Optional[Dict], Optional[Dict]]:
-        """Récupère les données des deux APIs Steam (détails et avis)."""
-        details_url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&cc=FR&l=french"
-        reviews_url = f"https://store.steampowered.com/appreviews/{app_id}?json=1&language=all"
-        
-        async def fetch_json(url: str, retries: int = 3) -> Optional[Dict]:
-            """ Tente de fetch une URL JSON avec une stratégie de retry sur le code 429. """
-            for i in range(retries):
-                try:
-                    async with session.get(url, timeout=self.REQUEST_TIMEOUT) as response:
-                        # Cas 1: Succès
-                        if response.status == 200:
-                            self.delay_manager.record_success()
-                            return await response.json(content_type=None)
-                        
-                        # Cas 2: Rate Limit (Avertissement)
-                        elif response.status == 429:
-                            self.delay_manager.record_rate_limit()
-                            retry_delay = (i + 1) * 30 # Attente croissante : 30s, 60s, 90s
-                            logging.warning(f"API Rate Limited (429) sur {url}. Nouvelle tentative dans {retry_delay}s...")
-                            await asyncio.sleep(retry_delay)
-                            continue # On passe à la prochaine itération de la boucle
-                        
-                        # Cas 3: Bannissement (Grave)
-                        elif response.status == 403:
-                            raise IPBannedException(f"IP bannie par l'API ({response.status}) sur {url}")
-                        
-                        # Cas 4: Autre erreur serveur
-                        else:
-                            logging.warning(f"Erreur inattendue de l'API ({response.status}) sur {url}")
-                            return None
-
-                except (aiohttp.ClientError, json.JSONDecodeError, asyncio.TimeoutError) as e:
-                    logging.warning(f"Erreur réseau/JSON pour {url}: {e}")
-                    return None
+            results = await asyncio.gather(
+                session.get(urls["details"]), session.get(urls["reviews"]), session.get(urls["store_page"])
+            )
+            for resp in results:
+                if resp.status == 429: return RequestOutcome.RATE_LIMIT
+                if resp.status == 403: raise IPBannedException(f"Statut 403 (banni) sur {resp.url}")
+                resp.raise_for_status()
             
-            logging.error(f"Échec de la récupération de {url} après {retries} tentatives.")
-            return None
+            details_json = await results[0].json(content_type=None)
+            reviews_json = await results[1].json(content_type=None)
+            store_html = await results[2].text()
 
-        # Lance les deux requêtes API en parallèle
-        return await asyncio.gather(fetch_json(details_url), fetch_json(reviews_url))
+            if "g-recaptcha" in store_html: raise IPBannedException("CAPTCHA détecté")
 
-    async def process_game_details(self, app_id: int, session: aiohttp.ClientSession, processor: SteamDataProcessor, semaphore: asyncio.Semaphore):
-        """Worker qui télécharge, structure et valide les données d'un seul jeu."""
-        async with semaphore:
-            try:
-                # Pause dynamique avant chaque requête
-                await asyncio.sleep(self.delay_manager.get_delay())
-                
-                # Récupère la page du magasin et les données API en parallèle
-                store_html, api_data = await asyncio.gather(
-                    self.fetch_with_retries(session, f"https://store.steampowered.com/app/{app_id}/"),
-                    self.fetch_steam_api_data_async(session, app_id)
-                )
+            structured_data = self.processor.extract_and_structure_data(app_id, details_json, reviews_json, store_html)
+            if structured_data:
+                self.processor.process_and_validate_item(structured_data)
+                await self.processor.flush_batches_if_needed()
+            return RequestOutcome.SUCCESS
 
-                if not all(api_data or []) or not store_html:
-                    logging.warning(f"Données incomplètes pour l'App ID {app_id}. Annulation.")
-                    return
-                
-                details_json, reviews_json = api_data
-                structured_data = processor.extract_and_structure_data(app_id, details_json, reviews_json, store_html)
-                
-                if structured_data:
-                    processor.process_and_validate_item(structured_data)
-                    await processor.flush_batches_if_needed()
-            except IPBannedException:
-                raise # Propage l'exception pour déclencher l'hibernation
-            except Exception:
-                logging.exception(f"Erreur inattendue pour l'App ID {app_id}")
+        except IPBannedException: raise
+        except Exception as e:
+            logger.debug(f"Erreur traitée pour l'App ID {app_id}: {e}")
+            return RequestOutcome.FAILURE
 
     async def run(self):
-        """Orchestre le traitement de TOUS les jeux en boucle continue."""
-        # --- Étape 1 : Préparation des IDs ---
-        if not os.path.exists(self.ALL_IDS_FILENAME):
-            logging.info(f"Le fichier '{self.ALL_IDS_FILENAME}' est introuvable. Lancement de la découverte.")
-            all_ids = await self.discover_all_app_ids_from_json()
-            if all_ids:
-                self.save_all_ids(all_ids, self.ALL_IDS_FILENAME)
-            else:
-                logging.error("La découverte n'a renvoyé aucun ID. Arrêt du script.")
-                return
-        else:
-            all_ids = self.load_ids(self.ALL_IDS_FILENAME)
+        logger.info("Lancement du scraper auto-ajustable...")
+        all_ids = self.discover_all_app_ids_from_json(self.args.source_file)
+        if not all_ids or not self.processor.schema: return
 
-        processor = SteamDataProcessor(
-            output_filename=self.OUTPUT_FILENAME, schema_filename=self.SCHEMA_FILENAME,
-            invalid_output_filename=self.INVALID_OUTPUT_FILENAME, batch_size=self.BATCH_SAVE_SIZE,
-            enable_logging=True
-        )
-        if not processor.schema:
-            return
+        async with aiohttp.ClientSession(headers=self.HEADERS, cookies=self.COOKIES, timeout=aiohttp.ClientTimeout(total=self.args.timeout)) as session:
+            while True:
+                processed_ids = self.get_already_processed_ids([self.args.output_file, self.args.invalid_output_file])
+                remaining_ids = sorted(list(all_ids - processed_ids))
+                if not remaining_ids: break
 
-        # --- Étape 2 : Boucle principale de scraping ---
-        while True:
-            processed_ids = self.get_already_processed_ids(self.OUTPUT_FILENAME).union(
-                self.get_already_processed_ids(self.INVALID_OUTPUT_FILENAME)
-            )
-            remaining_ids = sorted(list(all_ids - processed_ids))
-            
-            if not remaining_ids:
-                logging.info("🎉 Tous les jeux ont été traités. Travail terminé.")
-                break
-
-            ids_for_this_run = remaining_ids[:self.SCRAPE_CHUNK_SIZE]
-            logging.info("--- NOUVELLE SESSION DE SCRAPING ---")
-            logging.info(f"{len(remaining_ids)} jeux restants. Traitement d'un lot de {len(ids_for_this_run)}.")
-            
-            try:
-                semaphore = asyncio.Semaphore(self.SCRAPE_CONCURRENCY)
-                async with aiohttp.ClientSession(headers=self.HEADERS) as session:
-                    tasks = [self.process_game_details(app_id, session, processor, semaphore) for app_id in ids_for_this_run]
-                    await tqdm_asyncio.gather(*tasks, desc="Traitement du lot")
+                ids_for_this_run = remaining_ids[:self.args.chunk_size]
+                logger.info("--- NOUVEAU LOT ---")
+                logger.info(self.governor.status_line)
                 
-            except IPBannedException as e:
-                logging.error(f"🚫 BAN IP DÉTECTÉ : {e}")
-                logging.warning(f"Sauvegarde des données et hibernation pour {self.HIBERNATION_DURATION_MINUTES} minutes.")
-                processor.finalize_processing()
-                
-                hibernation_seconds = self.HIBERNATION_DURATION_MINUTES * 60
-                for i in range(hibernation_seconds, 0, -1):
-                    print(f"\rReprise dans {i // 60:02d}:{i % 60:02d}...", end="")
-                    time.sleep(1)
-                print(f"\r{' ' * 40}\r", end="") # Efface la ligne du compte à rebours
-                logging.info("Hibernation terminée. Poursuite du scraping...")
+                try:
+                    semaphore = asyncio.Semaphore(self.governor.get_concurrency())
+                    
+                    async def worker(app_id):
+                        async with semaphore:
+                            outcome = await self.process_game_details(app_id, session)
+                            self.governor.record_outcome(outcome)
+                    
+                    await tqdm_asyncio.gather(*[worker(app_id) for app_id in ids_for_this_run], desc="Traitement du lot")
+                    
+                    # Ajuste la stratégie pour le prochain lot
+                    self.governor.assess_and_adjust()
 
-        # --- Étape 3 : Finalisation ---
-        logging.info("Sauvegarde finale des données restantes...")
-        processor.finalize_processing()
-        logging.info("✅ Script terminé.")
+                except IPBannedException as e:
+                    logger.error(f"🚫 BAN IP DÉTECTÉ: {e}")
+                    logger.warning(f"Sauvegarde et hibernation pour {self.args.hibernate_minutes} minutes.")
+                    self.processor.finalize_processing()
+                    self.governor.reset_after_ban()
+                    
+                    for i in range(self.args.hibernate_minutes * 60, 0, -1):
+                        print(f"\rReprise dans {i // 60:02d}:{i % 60:02d}...", end="")
+                        await asyncio.sleep(1)
+                    print("\r" + " " * 40 + "\r", end="")
 
-if __name__ == "__main__":
-    # Correction nécessaire pour la compatibilité aiohttp sur Windows
-    if os.name == 'nt':
+        self.processor.finalize_processing()
+        logger.info("🎉 Tous les jeux ont été traités. Script terminé.")
+
+def main():
+    parser = argparse.ArgumentParser(description="Scraper Steam auto-ajustable avec Gouverneur de Performance.")
+    
+    # --- Arguments de base ---
+    parser.add_argument('--source-file', type=str, default="data_collected/steam_indie_games_final_api.json")
+    # CORRIGÉ: add-argument -> add_argument
+    parser.add_argument('--output-file', type=str, default="data_collected/steam_indie_games_detailed.jsonl")
+    parser.add_argument('--invalid-output-file', type=str, default="data_collected/steam_indie_games_errors.jsonl")
+    parser.add_argument('--chunk-size', type=int, default=100)
+    parser.add_argument('--hibernate-minutes', type=int, default=30)
+    parser.add_argument('--timeout', type=int, default=30)
+    
+    # --- Arguments du Gouverneur de Performance ---
+    gov_group = parser.add_argument_group('Gouverneur de Performance')
+    gov_group.add_argument('--min-concurrency', type=int, default=5, help="Concurrence minimale.")
+    gov_group.add_argument('--max-concurrency', type=int, default=8, help="Concurrence maximale que le gouverneur peut viser.")
+    gov_group.add_argument('--min-delay', type=float, default=3.0, help="Délai minimal absolu (en secondes).")
+    gov_group.add_argument('--max-delay', type=float, default=7.0, help="Délai maximal après de multiples erreurs.")
+    gov_group.add_argument('--history-size', type=int, default=100, help="Nombre de requêtes récentes à analyser pour prendre des décisions.")
+    gov_group.add_argument('--throttle-threshold-pct', type=float, default=7.5, help="Pourcentage d'erreurs 429 pour passer en mode THROTTLED.")
+
+    parser.add_argument('--verbose', action='store_true', help="Active les logs de débogage.")
+    args = parser.parse_args()
+    
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    # 'force=True' est utile pour reconfigurer le logger dans les environnements comme Jupyter
+    logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S', force=True)
+
+    if os.name == 'nt': 
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     
-    # Instanciation et exécution du scraper
-    scraper = SteamScraper()
+    scraper = SteamScraper(args)
     asyncio.run(scraper.run())
+
+# N'oubliez pas de vous assurer que le point d'entrée du script appelle bien cette fonction main corrigée.
+if __name__ == "__main__":
+    main()

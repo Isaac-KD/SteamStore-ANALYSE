@@ -16,7 +16,7 @@ class SteamAppData:
     app_id: int
     nom: Optional[str]
     image: Optional[str]
-    type: str
+    type: str 
     description_courte: Optional[str]
     description_detaillee: Optional[str]
     est_gratuit: bool

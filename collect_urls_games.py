@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
-
+ 
 # --- Configuration ---
 # L'URL de l'API "cachée" de Steam pour la recherche
 API_URL = "https://store.steampowered.com/search/results?tags=492&ndl=1"

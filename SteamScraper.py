@@ -136,24 +136,33 @@ class SteamScraper:
         self.HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
         self.COOKIES = {'birthtime': '568022401', 'wants_mature_content': '1', 'Steam_Language': 'english', 'steamCountry': 'US'}
 
-    def _get_steam_urls(self, app_id: int): # ... (inchangé)
+    def _get_steam_urls(self, app_id: int):
         return {"details": f"https://store.steampowered.com/api/appdetails?appids={app_id}&l=english",
                 "reviews": f"https://store.steampowered.com/appreviews/{app_id}?json=1&language=english",
                 "store_page": f"https://store.steampowered.com/app/{app_id}/?l=english"}
     
     @staticmethod
-    def get_already_processed_ids(filenames: List[str]): # ... (inchangé)
+    def get_already_processed_ids(filenames: List[str]):
         processed_ids = set()
         for filename in filenames:
             if not os.path.exists(filename): continue
+            # On s'assure que le fichier est bien fermé même en cas d'erreur
             with open(filename, 'r', encoding='utf-8') as f:
                 for line in f:
-                    try: processed_ids.add(json.loads(line)['app_id'])
-                    except (json.JSONDecodeError, KeyError): continue
+                    try: 
+                        # --- LA CORRECTION DÉFINITIVE ---
+                        # On charge le JSON et on convertit l'ID en entier.
+                        # Cela garantit que processed_ids ne contient QUE des entiers.
+                        app_id = int(json.loads(line)['app_id'])
+                        processed_ids.add(app_id)
+                    except (json.JSONDecodeError, KeyError, ValueError, TypeError): 
+                        # Attrape toutes les erreurs possibles: ligne non-JSON, 
+                        # clé manquante, valeur non convertible en int (ex: None)
+                        continue
         return processed_ids
 
     @staticmethod
-    def discover_all_app_ids_from_json(source_file: str): # ... (inchangé)
+    def discover_all_app_ids_from_json(source_file: str): 
         if not os.path.exists(source_file):
             logger.error(f"Fichier source '{source_file}' introuvable.")
             return set()

@@ -21,7 +21,7 @@ from typing import Set, Optional, Dict, Any, Tuple, List
 logger = logging.getLogger(__name__)
 
 try:
-    from SteamDataExtract import SteamDataProcessor
+    from SCRAPPING.SteamDataExtract import SteamDataProcessor
 except ImportError:
     logger.critical("ERREUR: Le fichier 'SteamDataExtract.py' est introuvable.")
     exit(1)

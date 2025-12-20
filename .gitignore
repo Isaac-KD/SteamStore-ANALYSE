@@ -1,5 +1,6 @@
 # Dossier de données
 data/
+plot/
 catboost_info/
 # Autres exemples courants
 *.csv

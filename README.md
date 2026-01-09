@@ -45,7 +45,7 @@ The repository is modularly organized to separate collection, processing, and an
 ├── 📂 data/               # 💾 Data & Processing
 │   ├── (parquet files)         # Raw and cleaned datasets.
 │   ├── cleaning.ipynb          # Data cleaning and train/test split code.
-│   └── valide_data.jsonl       # JSON schema.
+│   └── valide_data.jsonl       # Data.
 │
 ├── 📂 plot/               # 📉 Results Gallery
 │   └── (png files)            # Experimentation plots (EDA, SHAP, Confusion matrices).

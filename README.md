@@ -146,4 +146,8 @@ cd SteamStore-ANALYSE
 
 ## 👥 Credits
 
+<<<<<<< HEAD
 * **Author**: Isaac Kinane
+=======
+* **Author**: Isaac Kinane
+>>>>>>> 134d762 (read.me update)

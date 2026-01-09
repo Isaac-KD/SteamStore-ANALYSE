@@ -25,3 +25,5 @@ Le projet est organisé autour de trois fichiers principaux qui séparent claire
 3.  🐍 **`test_extract.py`**
     -   **Rôle :** Le point d'entrée exécutable du script.
     -   **Description :** Ce script gère le flux global de l'application : il définit la liste des identifiants de jeux (`app_id`) à traiter, configure l'environnement asynchrone, gère la limite de requêtes concurrentes à l'aide d'un sémaphore, et lance les tâches de scraping en parallèle. Il initialise et pilote le `SteamDataProcessor` pour mener à bien le traitement.
+  
+![Python](https://img.shields.io/badge/Python-3.8%2B-blue?style=for-the-badge&logo=python&logoColor=white)

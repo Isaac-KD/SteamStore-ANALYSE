@@ -3,6 +3,7 @@ data/
 #plot/
 catboost_info/
 # Autres exemples courants
+*.jsonl
 *.csv
 *.parquet
 *.h5

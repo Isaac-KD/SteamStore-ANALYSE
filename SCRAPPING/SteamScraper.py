@@ -150,9 +150,6 @@ class SteamScraper:
             with open(filename, 'r', encoding='utf-8') as f:
                 for line in f:
                     try: 
-                        # --- LA CORRECTION DÉFINITIVE ---
-                        # On charge le JSON et on convertit l'ID en entier.
-                        # Cela garantit que processed_ids ne contient QUE des entiers.
                         app_id = int(json.loads(line)['app_id'])
                         processed_ids.add(app_id)
                     except (json.JSONDecodeError, KeyError, ValueError, TypeError): 
@@ -252,7 +249,6 @@ def main():
     
     # --- Arguments de base ---
     parser.add_argument('--source-file', type=str, default="data_collected/steam_indie_games_final_api.json")
-    # CORRIGÉ: add-argument -> add_argument
     parser.add_argument('--output-file', type=str, default="data_collected/steam_indie_games_detailed.jsonl")
     parser.add_argument('--invalid-output-file', type=str, default="data_collected/steam_indie_games_errors.jsonl")
     parser.add_argument('--chunk-size', type=int, default=100)
@@ -281,6 +277,5 @@ def main():
     scraper = SteamScraper(args)
     asyncio.run(scraper.run())
 
-# N'oubliez pas de vous assurer que le point d'entrée du script appelle bien cette fonction main corrigée.
 if __name__ == "__main__":
     main()
